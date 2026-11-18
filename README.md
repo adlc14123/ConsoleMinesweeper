@@ -1,2 +1,2 @@
 # ConsoleMinesweeper
-A very simple console minesweepergame.
+A very simple console minesweeper game.
