@@ -115,6 +115,7 @@ public:
     int getRemainingMines() const { return totalMines - flagsCount; }
     bool isGameOver() const { return gameOver; }
     bool isGameWon() const { return gameWon; }
+    bool isFirstMoveDone() const { return firstMoveDone; }
 
     bool isValidCoordinate(int r, int c) const {
         return r >= 0 && r < rows && c >= 0 && c < cols;
@@ -185,7 +186,7 @@ private:
         if (!isValidCoordinate(r, c)) return;
 
         Cell& cell = grid[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
-        if (cell.isRevealed || cell.isFlagged) return;
+        if (cell.isRevealed || cell.isFlagged || cell.isMine) return;
 
         cell.isRevealed = true;
 
@@ -220,11 +221,15 @@ private:
 
         // Chording only triggers if flag count matches number of adjacent mines
         if (flaggedCount != cell.adjacentMines) {
+            std::cout << "\n[!] Chording requires " << cell.adjacentMines 
+                      << " adjacent flag(s) (currently " << flaggedCount << ").\n";
             return;
         }
 
-        // Reveal all unflagged, unrevealed neighbors
+        // Check unflagged, unrevealed neighbors for mines
         bool hitMine = false;
+        std::vector<std::pair<int, int>> safeNeighbors;
+
         for (int dr = -1; dr <= 1; ++dr) {
             for (int dc = -1; dc <= 1; ++dc) {
                 if (dr == 0 && dc == 0) continue;
@@ -237,20 +242,27 @@ private:
                             neighbor.isRevealed = true;
                             hitMine = true;
                         } else {
-                            floodFill(nr, nc);
+                            safeNeighbors.emplace_back(nr, nc);
                         }
                     }
                 }
             }
         }
 
+        // If a mine was hit due to incorrect flagging, terminate immediately without uncovering safe cells
         if (hitMine) {
             gameOver = true;
             gameWon = false;
             revealAllMines();
-        } else {
-            checkVictoryCondition();
+            return;
         }
+
+        // Safe to uncover all unflagged neighbors
+        for (const auto& [nr, nc] : safeNeighbors) {
+            floodFill(nr, nc);
+        }
+
+        checkVictoryCondition();
     }
 
     // Checks if all non-mine cells have been uncovered
@@ -268,6 +280,17 @@ private:
         if (unrevealedCount == totalMines) {
             gameWon = true;
             gameOver = true;
+
+            // Automatically flag all remaining mines on victory for a complete board
+            for (int r = 0; r < rows; ++r) {
+                for (int c = 0; c < cols; ++c) {
+                    Cell& cell = grid[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+                    if (cell.isMine) {
+                        cell.isFlagged = true;
+                    }
+                }
+            }
+            flagsCount = totalMines;
         }
     }
 
@@ -279,6 +302,7 @@ public:
         Cell& cell = grid[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
 
         if (cell.isFlagged) {
+            std::cout << "\n[!] Cell is flagged. Unflag it before digging.\n";
             return;
         }
 
@@ -313,7 +337,10 @@ public:
         if (!isValidCoordinate(r, c)) return;
 
         Cell& cell = grid[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
-        if (cell.isRevealed) return;
+        if (cell.isRevealed) {
+            std::cout << "\n[!] Cannot flag an already revealed cell.\n";
+            return;
+        }
 
         if (cell.isFlagged) {
             cell.isFlagged = false;
@@ -343,7 +370,7 @@ public:
         std::cout << "============================================\n\n";
 
         // Column header (A, B, C, ...)
-        std::cout << "     ";
+        std::cout << "    ";
         for (int c = 0; c < cols; ++c) {
             char colChar = static_cast<char>('A' + c);
             std::cout << " " << colChar << "  ";
@@ -363,7 +390,9 @@ public:
             for (int c = 0; c < cols; ++c) {
                 const Cell& cell = grid[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
 
-                if (cell.isFlagged) {
+                if (gameOver && !gameWon && cell.isFlagged && !cell.isMine) {
+                    std::cout << "[X]"; // Misplaced flag indicated on game over
+                } else if (cell.isFlagged) {
                     std::cout << "[F]";
                 } else if (!cell.isRevealed) {
                     std::cout << "[ ]";
@@ -388,7 +417,7 @@ public:
     }
 };
 
-// Strict command parser for game actions (e.g., "DC3", "FC3", or "QUIT")
+// Strict command parser for game actions (e.g., "DC3", "FC3", or "QUIT" / "Q")
 UserCommand parseCommand(const std::string& rawInput, int maxRows, int maxCols) {
     UserCommand cmd;
     std::string trimmedInput = trim(rawInput);
@@ -398,13 +427,13 @@ UserCommand parseCommand(const std::string& rawInput, int maxRows, int maxCols) 
         return cmd;
     }
 
-    // Check for QUIT command (case-insensitive)
+    // Check for QUIT or Q command (case-insensitive)
     std::string uppercaseInput;
     for (char ch : trimmedInput) {
         uppercaseInput.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(ch))));
     }
 
-    if (uppercaseInput == "QUIT") {
+    if (uppercaseInput == "QUIT" || uppercaseInput == "Q") {
         cmd.isQuit = true;
         cmd.valid = true;
         cmd.action = 'Q';
@@ -424,11 +453,19 @@ UserCommand parseCommand(const std::string& rawInput, int maxRows, int maxCols) 
         return cmd;
     }
 
+    // Also check if stripped string is QUIT or Q (e.g., "Q U I T")
+    if (s == "QUIT" || s == "Q") {
+        cmd.isQuit = true;
+        cmd.valid = true;
+        cmd.action = 'Q';
+        return cmd;
+    }
+
     // Action prefix validation
     cmd.action = s[0];
     if (cmd.action != 'D' && cmd.action != 'F') {
         cmd.errorMessage = "Invalid command '" + trimmedInput + 
-                           "'. Must start with 'D' (Dig), 'F' (Flag), or be 'QUIT'.";
+                           "'. Must start with 'D' (Dig), 'F' (Flag), or be 'QUIT' / 'Q'.";
         return cmd;
     }
 
@@ -490,7 +527,7 @@ Difficulty getValidDifficultySelection() {
         std::cout << " 1. Easy   (8x10,  10 mines)\n";
         std::cout << " 2. Medium (14x18, 40 mines)\n";
         std::cout << " 3. Hard   (20x24, 99 mines)\n";
-        std::cout << "Type QUIT to exit\n";
+        std::cout << "Type QUIT or Q to exit\n";
         std::cout << "Choice (1-3 or QUIT): ";
 
         std::string line;
@@ -505,7 +542,7 @@ Difficulty getValidDifficultySelection() {
             upperInput.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(ch))));
         }
 
-        if (upperInput == "QUIT") return Difficulty::Quit;
+        if (upperInput == "QUIT" || upperInput == "Q") return Difficulty::Quit;
         if (input == "1") return Difficulty::Easy;
         if (input == "2") return Difficulty::Medium;
         if (input == "3") return Difficulty::Hard;
@@ -517,7 +554,7 @@ Difficulty getValidDifficultySelection() {
 // Prompt and validate game command (Dig, Flag, or Quit)
 UserCommand getValidUserCommand(const MinesweeperBoard& board) {
     while (true) {
-        std::cout << "\nEnter command (e.g., DC3 to Dig C3, FC3 to Flag C3, or QUIT to exit): ";
+        std::cout << "\nEnter command (e.g., DC3 to Dig C3, FC3 to Flag C3, or QUIT / Q to exit): ";
         std::string input;
         if (!std::getline(std::cin, input)) {
             std::cout << "\nInput stream interrupted.\n";
@@ -571,13 +608,17 @@ int main() {
         MinesweeperBoard board;
         board.setup(diff);
 
-        // Start timer
+        // Timer will start once the first move is completed
+        bool timerStarted = false;
         auto startTime = std::chrono::steady_clock::now();
 
         while (!board.isGameOver()) {
-            auto currentTime = std::chrono::steady_clock::now();
-            auto elapsedSeconds = std::chrono::duration_cast<std::chrono::seconds>(
-                currentTime - startTime).count();
+            long long elapsedSeconds = 0;
+            if (timerStarted) {
+                auto currentTime = std::chrono::steady_clock::now();
+                elapsedSeconds = std::chrono::duration_cast<std::chrono::seconds>(
+                    currentTime - startTime).count();
+            }
 
             board.display(elapsedSeconds);
 
@@ -592,14 +633,22 @@ int main() {
             } else if (cmd.action == 'F') {
                 board.toggleFlag(cmd.row, cmd.col);
             }
+
+            if (!timerStarted && board.isFirstMoveDone()) {
+                startTime = std::chrono::steady_clock::now();
+                timerStarted = true;
+            }
         }
 
         if (!keepPlaying) break;
 
         // Calculate total time spent
-        auto endTime = std::chrono::steady_clock::now();
-        auto totalSeconds = std::chrono::duration_cast<std::chrono::seconds>(
-            endTime - startTime).count();
+        long long totalSeconds = 0;
+        if (timerStarted) {
+            auto endTime = std::chrono::steady_clock::now();
+            totalSeconds = std::chrono::duration_cast<std::chrono::seconds>(
+                endTime - startTime).count();
+        }
 
         board.display(totalSeconds);
 
